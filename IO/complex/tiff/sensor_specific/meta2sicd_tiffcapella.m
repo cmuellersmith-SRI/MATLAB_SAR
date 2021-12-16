@@ -30,12 +30,15 @@ symmetry=[0 strcmpi(meta.native.tiff.ImageDescription.collect.radar.pointing,'le
 meta.CollectionInfo.CollectorName = meta.native.tiff.ImageDescription.collect.platform;
 [startTime, startTimeFrac] = datenum_w_frac(...
     meta.native.tiff.ImageDescription.collect.start_timestamp);
-meta.CollectionInfo.CoreName = [... % Start with NGA-like prefix
-        upper(datestr(startTime,'ddmmmyy')) ...
-        meta.CollectionInfo.CollectorName ...
-        upper(datestr(startTime,'HHMMSS'))];  % Maybe should put something better here
+% meta.CollectionInfo.CoreName = [... % NGA-style CoreName and prefix
+%         upper(datestr(startTime,'ddmmmyy')) ...
+%         meta.CollectionInfo.CollectorName ...
+%         upper(datestr(startTime,'HHMMSS'))];
+meta.CollectionInfo.CoreName = meta.native.tiff.ImageDescription.collect.collect_id;  % Capella-style CoreName
 meta.CollectionInfo.CollectType = 'MONOSTATIC';
 switch meta.native.tiff.ImageDescription.collect.mode
+    case 'spotlight'
+        meta.CollectionInfo.RadarMode.ModeType = 'SPOTLIGHT';
     case 'stripmap'
         meta.CollectionInfo.RadarMode.ModeType = 'STRIPMAP';
     case 'sliding_spotlight'
@@ -66,6 +69,9 @@ meta.ImageData.SCPPixel.Row = floor(meta.ImageData.NumRows/2);
 if strcmpi(meta.native.tiff.ImageDescription.collect.radar.pointing,'left')
     meta.ImageData.SCPPixel.Col = meta.ImageData.NumCols - meta.ImageData.SCPPixel.Col - 1;
 end
+% Note that meta.native.tiff.ImageDescription.collect.image.center_pixel.center_time
+% is merely (start_timestamp + stop_timestamp)/2.  It does not denote the
+% zero Doppler time of what the center pixel should be.
 
 %% GeoData
 meta.GeoData.EarthModel='WGS_84';
@@ -105,12 +111,10 @@ meta.Position.ARPPoly.Y = P_y(end:-1:1).';
 meta.Position.ARPPoly.Z = P_z(end:-1:1).';
 
 %% Grid
-if strcmp(meta.native.tiff.ImageDescription.product_type,'SLC') && ...
-        ~strcmp(meta.native.tiff.ImageDescription.collect.image.algorithm,'backprojection')
+if strcmp(meta.native.tiff.ImageDescription.product_type,'SLC')
+    % Capella generally uses this grid, even for backprojected data
     meta.Grid.ImagePlane = 'SLANT';
     meta.Grid.Type = 'RGZERO';
-else
-    meta.Grid.ImagePlane = 'OTHER';  % DEM
 end
 % center_pixel.center time is actually zero Doppler time
 [coaTime, coaTimeFrac] = datenum_w_frac(...
@@ -118,28 +122,23 @@ end
 meta.Grid.TimeCOAPoly = round((coaTime-startTime)*SECONDS_IN_A_DAY) + ... % Convert from days to secs
         (coaTimeFrac-startTimeFrac); % Handle fractional seconds;
 % Capella format and SICD label rows/columns differently
-meta.Grid.Row.SS = meta.native.tiff.ImageDescription.collect.image.pixel_spacing_column;
+meta.Grid.Row.SS = meta.native.tiff.ImageDescription.collect.image.image_geometry.delta_range_sample;
+% meta.native.tiff.ImageDescription.collect.image.pixel_spacing_column is ground spacing
 meta.Grid.Col.SS = meta.native.tiff.ImageDescription.collect.image.pixel_spacing_row;
-% This may not make sense for backprojected data
-% output_meta.Grid.Row.Sgn = -1;
-% output_meta.Grid.Col.Sgn = -1;
-bw = meta.native.tiff.ImageDescription.collect.radar.pulse_bandwidth;
-fc = meta.native.tiff.ImageDescription.collect.radar.center_frequency; % Center frequency
-meta.Grid.Row.ImpRespBW = 2*bw/SPEED_OF_LIGHT;
+meta.Grid.Row.Sgn = -1;
+meta.Grid.Col.Sgn = -1;
+bw = meta.native.tiff.ImageDescription.collect.radar.time_varying_parameters.pulse_bandwidth;
+if isfield(meta.native.tiff.ImageDescription.collect.image,'processed_range_bandwidth')
+    meta.Grid.Row.ImpRespBW = 2*meta.native.tiff.ImageDescription.collect.image.processed_range_bandwidth/SPEED_OF_LIGHT;
+else
+    meta.Grid.Row.ImpRespBW = 2*bw/SPEED_OF_LIGHT;
+end
 meta.Grid.Row.ImpRespWid =  meta.native.tiff.ImageDescription.collect.image.range_resolution;
 meta.Grid.Col.ImpRespWid =  meta.native.tiff.ImageDescription.collect.image.azimuth_resolution;
 dop_bw = meta.native.tiff.ImageDescription.collect.image.processed_azimuth_bandwidth; % Doppler bandwidth
-pos_coefs = [P_x(:) P_y(:) P_z(:)];
-% Velocity is derivate of position.
-vel_coefs=pos_coefs(1:end-1,:).*repmat(((size(pos_coefs,1)-1):-1:1)',[1 3]);
-vel_x = polyval(vel_coefs(:,1), meta.Grid.TimeCOAPoly(1,1));
-vel_y = polyval(vel_coefs(:,2), meta.Grid.TimeCOAPoly(1,1));
-vel_z = polyval(vel_coefs(:,3), meta.Grid.TimeCOAPoly(1,1));
-vm_ca_sq = vel_x.^2 + vel_y.^2 + vel_z.^2; % Magnitude of the velocity squared
-% ss_zd_s = Col.SS/sqrt(vm_ca_sq(1))/RMA.INCA.DRateSFPoly(1,1);
-% ss_zd_s only an approximation for backprojection images
-ss_zd_s = meta.Grid.Col.SS/sqrt(vm_ca_sq(1));  % Assume DRateSFPoly = 1 for airborne prototype
-meta.Grid.Col.ImpRespBW = dop_bw*abs(ss_zd_s)/meta.Grid.Col.SS; % Convert to azimuth spatial bandwidth (cycles per meter);  % Currently no way to compute this
+ss_zd_s = meta.native.tiff.ImageDescription.collect.image.image_geometry.delta_line_time;
+meta.Grid.Col.ImpRespBW = dop_bw*abs(ss_zd_s)/meta.Grid.Col.SS; % Convert to azimuth spatial bandwidth (cycles per meter);
+fc = meta.native.tiff.ImageDescription.collect.radar.center_frequency; % Center frequency
 meta.Grid.Row.KCtr = 2*fc/SPEED_OF_LIGHT;
 meta.Grid.Col.KCtr = 0;
 meta.Grid.Row.DeltaK1 = -meta.Grid.Row.ImpRespBW/2;
@@ -156,21 +155,31 @@ if ~isempty(par_names)
         meta.native.tiff.ImageDescription.collect.image.range_window.parameters.(...
         meta.Grid.Row.WgtType.Parameter.name));
 end
-meta.Grid.Col.WgtType.WindowName = ...
-    meta.native.tiff.ImageDescription.collect.image.azimuth_window.name;
-par_names = fieldnames(meta.native.tiff.ImageDescription.collect.image.azimuth_window.parameters);
-if ~isempty(par_names)
-    meta.Grid.Col.WgtType.Parameter.name = par_names{1};
-    meta.Grid.Col.WgtType.Parameter.value =  num2str( ...
-        meta.native.tiff.ImageDescription.collect.image.azimuth_window.parameters.(...
-        meta.Grid.Col.WgtType.Parameter.name));
+if strcmpi(meta.Grid.Row.WgtType.WindowName,'avci-nacaroglu')
+    meta.Grid.Row.WgtFunct = avci_nacaroglu_window(32,...
+        meta.native.tiff.ImageDescription.collect.image.range_window.parameters.alpha);
 end
-% TODO: Numeric WgtFunct
+if strcmpi(meta.native.tiff.ImageDescription.collect.image.azimuth_window.name,'antenna-taper')
+    meta.Grid.Col.WgtType.WindowName = 'UNIFORM';
+    % Antenna pattern has not been removed and no additional weighting was
+    % applied.  This is further indicated below in the ImageFormation
+    % section by setting STBeamComp to 'NO'.
+else
+    meta.Grid.Col.WgtType.WindowName = ...
+        meta.native.tiff.ImageDescription.collect.image.azimuth_window.name;
+    par_names = fieldnames(meta.native.tiff.ImageDescription.collect.image.azimuth_window.parameters);
+    if ~isempty(par_names)
+        meta.Grid.Col.WgtType.Parameter.name = par_names{1};
+        meta.Grid.Col.WgtType.Parameter.value =  num2str( ...
+            meta.native.tiff.ImageDescription.collect.image.azimuth_window.parameters.(...
+            meta.Grid.Col.WgtType.Parameter.name));
+    end
+end
 
 %% Radar Collection
 meta.RadarCollection.Waveform.WFParameters.TxRFBandwidth = bw;
 meta.RadarCollection.Waveform.WFParameters.TxPulseLength = ...
-    meta.native.tiff.ImageDescription.collect.radar.pulse_duration;
+    meta.native.tiff.ImageDescription.collect.radar.time_varying_parameters.pulse_duration;
 meta.RadarCollection.Waveform.WFParameters.RcvDemodType='CHIRP';
 meta.RadarCollection.Waveform.WFParameters.ADCSampleRate = ...
     meta.native.tiff.ImageDescription.collect.radar.sampling_frequency;
@@ -185,9 +194,10 @@ meta.RadarCollection.RcvChannels.ChanParameters.TxRcvPolarization = ...
     [meta.native.tiff.ImageDescription.collect.radar.transmit_polarization ...
     ':' meta.native.tiff.ImageDescription.collect.radar.receive_polarization];
 meta.RadarCollection.TxPolarization = ...
-    meta.native.tiff.ImageDescription.collect.radar.transmit_polarization;;
+    meta.native.tiff.ImageDescription.collect.radar.transmit_polarization;
 
 %% Timeline
+% TODO: Include multiple PRFs
 meta.Timeline.CollectStart = startTime + (startTimeFrac/SECONDS_IN_A_DAY);
 prf = meta.native.tiff.ImageDescription.collect.radar.prf.prf;
 [endTime, endTimeFrac] = datenum_w_frac(...
@@ -204,25 +214,70 @@ meta.Timeline.IPP.Set.TEnd = double(meta.Timeline.IPP.Set.IPPEnd)/prf;
 %% Image Formation
 meta.ImageFormation.RcvChanProc = struct('NumChanProc', uint32(1), ...
     'PRFScaleFactor', 1);
-meta.ImageFormation.ImageFormAlgo = meta.native.tiff.ImageDescription.collect.image.algorithm;
+if strcmp(meta.native.tiff.ImageDescription.collect.image.algorithm,'backprojection')
+    % meta.ImageFormation.ImageFormAlgo = meta.native.tiff.ImageDescription.collect.image.algorithm;
+    meta.ImageFormation.ImageFormAlgo = 'OTHER';  % Stay within SICD spec as much as possible
+end
 meta.ImageFormation.TStartProc = 0;
 meta.ImageFormation.TEndProc = meta.Timeline.CollectDuration;
 meta.ImageFormation.TxFrequencyProc.MinProc = ...
     meta.RadarCollection.TxFrequency.Min;
 meta.ImageFormation.TxFrequencyProc.MaxProc = ...
     meta.RadarCollection.TxFrequency.Max;
+meta.ImageFormation.TxRcvPolarizationProc = ...
+    meta.RadarCollection.RcvChannels.ChanParameters.TxRcvPolarization;
 meta.ImageFormation.STBeamComp = 'NO';
 meta.ImageFormation.ImageBeamComp = 'NO';
 meta.ImageFormation.AzAutofocus = 'NO';
 meta.ImageFormation.RgAutofocus = 'NO';
-meta.ImageFormation.Processing.Type = 'Backprojected to DEM';
+meta.ImageFormation.Processing.Type = 'Backprojection';
 meta.ImageFormation.Processing.Applied = true;
 
+%% RMA
+% Capella data is often processed with backprojection, but is formed to a
+% RGZERO grid, so we treat it as RMA/INCA.
+meta.RMA.RMAlgoType = 'RG_DOP';
+meta.RMA.ImageType = 'INCA';
+near_range = meta.native.tiff.ImageDescription.collect.image.image_geometry.range_to_first_sample;
+meta.RMA.INCA.R_CA_SCP = near_range + ...
+    (double(meta.ImageData.SCPPixel.Row)*meta.Grid.Row.SS);
+meta.RMA.INCA.FreqZero = fc;
+[centerTime, centerTimeFrac] = datenum_w_frac(...
+    meta.native.tiff.ImageDescription.collect.image.center_pixel.center_time);
+[firstTime, firstTimeFrac] = datenum_w_frac(...
+    meta.native.tiff.ImageDescription.collect.image.image_geometry.first_line_time);
+zd_t_scp = round((centerTime-firstTime)*SECONDS_IN_A_DAY) + ... % Convert from days to secs
+        (centerTimeFrac-firstTimeFrac);
+meta.RMA.INCA.TimeCAPoly = [zd_t_scp; ss_zd_s/meta.Grid.Col.SS];
+pos_coefs = [P_x(:) P_y(:) P_z(:)];
+% Velocity is derivate of position.
+vel_coefs=pos_coefs(1:end-1,:).*repmat(((size(pos_coefs,1)-1):-1:1)',[1 3]);
+vel_x = polyval(vel_coefs(:,1), meta.Grid.TimeCOAPoly(1,1));
+vel_y = polyval(vel_coefs(:,2), meta.Grid.TimeCOAPoly(1,1));
+vel_z = polyval(vel_coefs(:,3), meta.Grid.TimeCOAPoly(1,1));
+vm_ca_sq = vel_x.^2 + vel_y.^2 + vel_z.^2; % Magnitude of the velocity squared
+meta.RMA.INCA.DRateSFPoly = 1/(sqrt(vm_ca_sq(1))*meta.RMA.INCA.TimeCAPoly(2));
+% TODO: Doppler centroid
+
 %% Radiometric
-% TODO: This isn't right for airborne prototypes.  Confirm this later.
-% meta.Radiometric.BetaZeroSFPoly = meta.native.tiff.ImageDescription.image.scale_factor;
+if strcmp(meta.native.tiff.ImageDescription.collect.image.radiometry,'beta_nought')
+    meta.Radiometric.BetaZeroSFPoly = meta.native.tiff.ImageDescription.collect.image.scale_factor^2;
+else
+    warning('META2SICD_TIFFCAPELLA:UNRECOGNIZED_CALIBRATION', ...
+            ['Radiometry mode ' meta.native.tiff.ImageDescription.collect.image.radiometry ' not currently handled.']);
+end
 
 meta = derived_sicd_fields(meta);
+
+if isfield(meta,'Radiometric') && isfield(meta.Radiometric,'SigmaZeroSFPoly')
+    meta.Radiometric.NoiseLevel.NoiseLevelType = 'ABSOLUTE';
+    % meta.Radiometric.NoiseLevel.NoisePoly = ...
+    %     meta.native.tiff.ImageDescription.collect.image.nesz_peak - 10*log10(meta.Radiometric.SigmaZeroSFPoly(1));
+    meta.Radiometric.NoiseLevel.NoisePoly = polyshift(...
+        meta.native.tiff.ImageDescription.collect.image.nesz_polynomial.coefficients(end:-1:1),meta.RMA.INCA.R_CA_SCP);
+    meta.Radiometric.NoiseLevel.NoisePoly(1) = meta.Radiometric.NoiseLevel.NoisePoly(1) -...
+        10*log10(meta.Radiometric.SigmaZeroSFPoly(1));
+end
 
 end
 
@@ -238,6 +293,17 @@ function [datenum_s, datenum_frac] = datenum_w_frac(datestring)
     datenum_frac = str2double(regexp(datestring,'\.\d*','match'));
     if isnan(datenum_frac), datenum_frac = 0; end
 end
+
+% Avci-Nacaroglu Exponential
+function out = avci_nacaroglu_window(n, alpha)
+    if ~exist('alpha','var')
+        alpha = 1.25;
+    end
+    n2 = floor(n/2);
+    t = ((0:(n-1)) - n2)/n;
+    out = exp(pi * alpha * (sqrt(1 - (2 * t).^2) - 1));
+end
+
 
 % //////////////////////////////////////////
 % /// CLASSIFICATION: UNCLASSIFIED       ///
