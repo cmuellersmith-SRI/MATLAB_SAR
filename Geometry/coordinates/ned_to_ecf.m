@@ -19,7 +19,7 @@ function ecf_value = ned_to_ecf(ned_value, orp_ecf, position_boolean)
 % OUTPUTS:
 %   ecf_value - required : ecf coordinates of ned_value               [m, m, m]
 
-ecf_value=(ecf_ned_rot_mat(orp_ecf).')*ned_value(:);
+ecf_value=(ecf_ned_rot_mat(orp_ecf).')*ned_value;
 if nargin<3||position_boolean % Assume value is a position coordinate, unless told otherwise
     ecf_value=ecf_value+orp_ecf(:);
 end
